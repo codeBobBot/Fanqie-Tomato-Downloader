@@ -112,9 +112,15 @@ class NovelDownloaderGUI(tk.Tk):
         ttk.Radiobutton(format_frame, text="EPUB", value="epub", variable=self.format_var).pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(format_frame, text="分章节TXT", value="chapter", variable=self.format_var).pack(side=tk.LEFT, padx=10)
         
+        # 下载范围输入
+        ttk.Label(input_frame, text="下载范围:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        self.range_entry = ttk.Entry(input_frame, width=20)
+        self.range_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="(留空=全部 | N=仅第N章 | 1-N=前N章)").grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
+        
         # 下载按钮
         self.download_button = ttk.Button(input_frame, text="开始下载", command=self.start_download)
-        self.download_button.grid(row=4, column=1, pady=10)
+        self.download_button.grid(row=5, column=1, pady=10)
         
         # 进度条区域
         progress_frame = ttk.LabelFrame(main_frame, text="下载进度", padding="10")
@@ -164,6 +170,14 @@ class NovelDownloaderGUI(tk.Tk):
             
         if not save_path:
             messagebox.showerror("错误", "请选择保存路径")
+            return
+
+        # 校验下载范围格式（语法层面；越界在引擎内提示）
+        chapter_range = self.range_entry.get().strip()
+        try:
+            novel_downloader.parse_chapter_range(chapter_range)
+        except ValueError as e:
+            messagebox.showerror("错误", str(e))
             return
 
         # 检查EPUB格式所需的库
@@ -222,7 +236,8 @@ class NovelDownloaderGUI(tk.Tk):
         novel_downloader.OUTPUT_FORMAT = output_format
         
         # 在新线程中运行下载
-        self.download_thread = threading.Thread(target=self.run_download, args=(book_id, save_path, output_format))
+        self.download_thread = threading.Thread(target=self.run_download,
+                                                 args=(book_id, save_path, output_format, chapter_range))
         self.download_thread.daemon = True
         self.download_thread.start()
         
@@ -248,13 +263,14 @@ class NovelDownloaderGUI(tk.Tk):
         if self.is_downloading or drained:
             self.after(50, self.poll_queue)
 
-    def run_download(self, book_id, save_path, output_format):
+    def run_download(self, book_id, save_path, output_format, chapter_range=""):
         try:
             print(f"开始下载小说 ID: {book_id}")
             print(f"保存路径: {save_path}")
             print(f"使用线程数: {novel_downloader.MAX_WORKERS}")
             print(f"输出格式: {output_format}")
-            novel_downloader.Run(book_id, save_path)
+            print(f"下载范围: {chapter_range if chapter_range else '全部章节'}")
+            novel_downloader.Run(book_id, save_path, chapter_range or None)
             self.after(100, self.download_complete, "下载完成！")
         except Exception as e:
             self.after(100, self.download_complete, f"下载出错: {str(e)}")

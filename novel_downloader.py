@@ -15,6 +15,7 @@ from tqdm import tqdm
 cookie_path = "cookie.json"
 MAX_WORKERS = 5  # 默认线程数
 OUTPUT_FORMAT = "txt"  # 默认输出格式：txt（单文件）或 chapter（每章一个文件）
+CHAPTER_RANGE: Optional[str] = None  # 默认下载全部章节；'N'=仅第N章，'1-N'=前N章
 
 _cookie_cache = None  # Cookie 缓存，避免每个请求都重新生成
 
@@ -247,6 +248,31 @@ def safe_title(titles: List[str], i: int) -> str:
     return titles[i] if i < len(titles) else f"第{i + 1}章"
 
 
+def parse_chapter_range(range_str: Optional[str]) -> Optional[Tuple[int, int]]:
+    """解析下载范围字符串，返回 0-based 半开区间 [start, end)
+    支持格式：''/None=全部；'N'=仅第N章；'1-N'=前N章
+    格式非法、编号小于 1、区间倒置时抛出 ValueError"""
+    if range_str is None:
+        return None
+    s = str(range_str).strip()
+    if not s:
+        return None
+    m = re.fullmatch(r'(\d+)(?:\s*-\s*(\d+))?', s)
+    if not m:
+        raise ValueError(f"下载范围格式不合法: {s!r}（支持：留空=全部、N=仅第N章、1-N=前N章）")
+    start = int(m.group(1))
+    end = int(m.group(2)) if m.group(2) else None
+    if start < 1:
+        raise ValueError(f"下载范围格式不合法: {s!r}（章节编号从 1 开始）")
+    if end is None:
+        return start - 1, start  # 单章 [N-1, N)
+    if start != 1:
+        raise ValueError(f"下载范围格式不合法: {s!r}（仅支持 1-N 表示前N章）")
+    if end < start:
+        raise ValueError(f"下载范围格式不合法: {s!r}（结束章节不能小于起始章节）")
+    return 0, end  # 前N章 [0, N)
+
+
 def download_chapter(div: Any, headers: Dict[str, str], titles: List[str], i: int, total: int) -> Tuple[int, str, Optional[str]]:
     """下载单个章节，返回 (章节索引, 标题, 内容)；失败时内容为 None"""
     if not div.a:
@@ -383,19 +409,23 @@ def _fetch_catalog(book_id: str, headers: Dict[str, str]) -> Tuple[List[Any], Li
     return soup.select("div.chapter-item"), extract_chapter_titles(soup)
 
 
-def _download_all(li_list: List[Any], titles: List[str], headers: Dict[str, str]) -> List[Tuple[str, Optional[str]]]:
-    """多线程下载全部章节，结果按原索引归位（单章失败不影响整体）"""
+def _download_all(li_list: List[Any], titles: List[str], headers: Dict[str, str],
+                  start: Optional[int] = None, end: Optional[int] = None) -> List[Optional[Tuple[str, Optional[str]]]]:
+    """多线程下载章节，结果按原索引归位（单章失败不影响整体）
+    start/end 为 0-based 半开区间 [start, end)，None 表示全部；索引对应全书真实章节号"""
     total = len(li_list)
+    indices = range(start, end) if start is not None else range(total)
+    count = len(indices)
     # 结果按索引暂存，最后统一按顺序写出（避免并发写文件导致乱序/竞争）
     chapter_results: List[Optional[Tuple[str, Optional[str]]]] = [None] * total
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
-        for i, div in enumerate(li_list):
-            futures.append(executor.submit(download_chapter, div, get_headers(), titles, i, total))
+        for i in indices:
+            futures.append(executor.submit(download_chapter, li_list[i], get_headers(), titles, i, total))
 
-        # 使用进度条
-        for _ in tqdm(as_completed(futures), total=total, desc="下载进度"):
+        # 使用进度条（进度为本次范围内的章节数）
+        for _ in tqdm(as_completed(futures), total=count, desc="下载进度"):
             pass
 
         # 收集结果并按索引归位
@@ -408,10 +438,21 @@ def _download_all(li_list: List[Any], titles: List[str], headers: Dict[str, str]
     return chapter_results
 
 
-def Run(book_id: str, save_path: str) -> None:
-    """运行下载：获取书籍信息 → 章节列表 → 多线程下载 → 按格式写出"""
-    global OUTPUT_FORMAT
+def Run(book_id: str, save_path: str, chapter_range: Optional[str] = None) -> None:
+    """运行下载：获取书籍信息 → 章节列表 → 多线程下载 → 按格式写出
+    chapter_range: None/''=全部；'N'=仅第N章；'1-N'=前N章；未传时使用全局 CHAPTER_RANGE"""
+    global OUTPUT_FORMAT, CHAPTER_RANGE
     _clamp_workers()
+
+    # 解析章节范围（显式参数优先于全局变量），格式非法直接返回
+    range_str = chapter_range if chapter_range is not None else CHAPTER_RANGE
+    try:
+        parsed = parse_chapter_range(range_str)
+    except ValueError as e:
+        log(str(e))
+        return
+    start = parsed[0] if parsed else None
+    end = parsed[1] if parsed else None
 
     headers = get_headers()
 
@@ -428,12 +469,23 @@ def Run(book_id: str, save_path: str) -> None:
         log("未找到任何章节，请检查小说ID是否正确。")
         return
 
+    # 校验范围边界并截断越界部分
+    if start is not None:
+        if start >= total:
+            log(f"章节范围超出：第{start + 1}章不存在（全书共 {total} 章）。")
+            return
+        if end > total:
+            log(f"章节范围超出：第{end}章不存在（全书共 {total} 章），已截断为第{start + 1}-{total}章。")
+            end = total
+        log(f"本次下载范围: 第 {start + 1} - {end} 章（共 {end - start} 章）")
+
     os.makedirs(save_path, exist_ok=True)
     log(f"使用 {MAX_WORKERS} 个线程下载，共 {total} 章")
-    chapter_results = _download_all(li_list, titles, headers)
+    chapter_results = _download_all(li_list, titles, headers, start, end)
 
-    # 组装有序章节（跳过下载失败的）
-    chapters = [(i, title, content) for i, (title, content) in enumerate(chapter_results) if content]
+    # 组装有序章节（跳过未下载/下载失败的；范围下载时未选中的索引为 None）
+    chapters = [(i, result[0], result[1]) for i, result in enumerate(chapter_results)
+                if result is not None and result[1]]
     if not chapters:
         log("所有章节均下载失败。")
         return
@@ -454,8 +506,9 @@ def Run(book_id: str, save_path: str) -> None:
 def main() -> None:
     book_id = input("欢迎使用番茄小说下载器精简版！\n作者：Dlmos（Dlmily）\n基于DlmOS驱动\nGithub：https://github.com/Dlmily/Tomato-Novel-Downloader-Lite\n参考代码：https://github.com/ying-ck/fanqienovel-downloader/blob/main/src/ref_main.py\n赞助/了解新产品：https://afdian.com/a/dlbaokanluntanos\n\n请输入小说 ID：")
     save_path = input("请输入保存路径：")
+    range_str = input("下载范围（留空=全部；N=仅第N章；1-N=前N章）：").strip()
 
-    Run(book_id, save_path)
+    Run(book_id, save_path, range_str or None)
     log("下载完成！")
 
 

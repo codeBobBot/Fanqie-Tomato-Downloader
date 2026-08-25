@@ -68,6 +68,31 @@ class TestSafeTitle(unittest.TestCase):
         self.assertEqual(n.safe_title([], 0), '第1章')
 
 
+class TestParseChapterRange(unittest.TestCase):
+    """下载范围解析（''/None=全部，N=单章，1-N=前N章）"""
+
+    def test_none_and_empty_means_all(self):
+        self.assertIsNone(n.parse_chapter_range(None))
+        self.assertIsNone(n.parse_chapter_range(''))
+        self.assertIsNone(n.parse_chapter_range('   '))
+
+    def test_single_chapter(self):
+        self.assertEqual(n.parse_chapter_range('5'), (4, 5))
+        self.assertEqual(n.parse_chapter_range(' 3 '), (2, 3))
+        self.assertEqual(n.parse_chapter_range('1'), (0, 1))
+
+    def test_first_n_chapters(self):
+        self.assertEqual(n.parse_chapter_range('1-30'), (0, 30))
+        self.assertEqual(n.parse_chapter_range('1 - 5'), (0, 5))
+        self.assertEqual(n.parse_chapter_range('1-1'), (0, 1))
+
+    def test_invalid_formats_raise(self):
+        for bad in ('abc', '-5', '3-', '0', '0-5', '5-3', '1-0', '5-10'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    n.parse_chapter_range(bad)
+
+
 class TestWriteTxt(unittest.TestCase):
     """单文件 TXT 写出（顺序与文件名安全）"""
 
