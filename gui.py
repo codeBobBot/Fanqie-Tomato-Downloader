@@ -64,6 +64,7 @@ class NovelDownloaderGUI(tk.Tk):
         # 默认设置
         self.threads_var = tk.StringVar(value="5")
         self.format_var = tk.StringVar(value="txt")
+        self.site_var = tk.StringVar(value="fanqie")
         self.create_widgets()
         self.is_downloading = False
         self.download_thread = None
@@ -87,7 +88,14 @@ class NovelDownloaderGUI(tk.Tk):
         ttk.Label(input_frame, text="小说ID:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
         self.book_id_entry = ttk.Entry(input_frame, width=50)
         self.book_id_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(input_frame, text="(从番茄小说网址中获取)").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="(从小说网址中获取)").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
+        
+        # 小说网站选择
+        ttk.Label(input_frame, text="小说网站:").grid(row=0, column=3, sticky=tk.W, padx=5, pady=5)
+        self.site_combo = ttk.Combobox(input_frame, textvariable=self.site_var,
+                                       values=list(novel_downloader.SITE_REGISTRY),
+                                       state="readonly", width=10)
+        self.site_combo.grid(row=0, column=4, sticky=tk.W, padx=5, pady=5)
         
         # 保存路径输入
         ttk.Label(input_frame, text="保存路径:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
@@ -180,6 +188,12 @@ class NovelDownloaderGUI(tk.Tk):
             messagebox.showerror("错误", str(e))
             return
 
+        # 校验小说网站
+        site = self.site_var.get()
+        if site not in novel_downloader.SITE_REGISTRY:
+            messagebox.showerror("错误", f"不支持的网站: {site}")
+            return
+
         # 检查EPUB格式所需的库
         output_format = self.format_var.get()
         if output_format == "epub":
@@ -237,7 +251,7 @@ class NovelDownloaderGUI(tk.Tk):
         
         # 在新线程中运行下载
         self.download_thread = threading.Thread(target=self.run_download,
-                                                 args=(book_id, save_path, output_format, chapter_range))
+                                                 args=(book_id, save_path, output_format, chapter_range, site))
         self.download_thread.daemon = True
         self.download_thread.start()
         
@@ -263,14 +277,15 @@ class NovelDownloaderGUI(tk.Tk):
         if self.is_downloading or drained:
             self.after(50, self.poll_queue)
 
-    def run_download(self, book_id, save_path, output_format, chapter_range=""):
+    def run_download(self, book_id, save_path, output_format, chapter_range="", site="fanqie"):
         try:
             print(f"开始下载小说 ID: {book_id}")
+            print(f"小说网站: {site}")
             print(f"保存路径: {save_path}")
             print(f"使用线程数: {novel_downloader.MAX_WORKERS}")
             print(f"输出格式: {output_format}")
             print(f"下载范围: {chapter_range if chapter_range else '全部章节'}")
-            novel_downloader.Run(book_id, save_path, chapter_range or None)
+            novel_downloader.Run(book_id, save_path, chapter_range or None, site)
             self.after(100, self.download_complete, "下载完成！")
         except Exception as e:
             self.after(100, self.download_complete, f"下载出错: {str(e)}")

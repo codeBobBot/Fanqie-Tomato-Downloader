@@ -12,16 +12,16 @@ SPEC.loader.exec_module(n)
 
 
 class TestInterpreter(unittest.TestCase):
-    """解密字符映射表"""
+    """解密字符映射表（FanqieSite 适配器）"""
 
     def test_known_char_decrypt(self):
         # CODE_ST 处 bias=0，对应 charset[0] = 'D'
-        self.assertEqual(n.interpreter(n.CODE_ST), 'D')
+        self.assertEqual(n.FanqieSite.interpreter(n.FanqieSite.CODE_ST), 'D')
 
     def test_out_of_range_passthrough(self):
         # 超出映射范围的字符原样返回
         c = ord('a') + 1000
-        self.assertEqual(n.interpreter(c), chr(c))
+        self.assertEqual(n.FanqieSite.interpreter(c), chr(c))
 
 
 class TestCleanContent(unittest.TestCase):
@@ -120,26 +120,96 @@ class TestWriteChapters(unittest.TestCase):
 
 
 class TestDownTextRetry(unittest.TestCase):
-    """正文下载失败重试逻辑"""
+    """正文获取失败重试逻辑（站点无关，mock 适配器）"""
 
     def test_retries_three_times_then_none(self):
-        original_fetch = n.fetch_content_from_official
         original_sleep = n.time.sleep
         calls = {'count': 0}
 
-        def fake_fetch(item_id, headers):
-            calls['count'] += 1
-            return None
+        class FakeSite:
+            def fetch_chapter(self, item_id):
+                calls['count'] += 1
+                return None
 
-        n.fetch_content_from_official = fake_fetch
         n.time.sleep = lambda seconds: None  # 加速测试
         try:
-            result = n.down_text('123', {'Cookie': 'x'})
+            result = n._fetch_with_retry(FakeSite(), '123')
             self.assertIsNone(result)
             self.assertEqual(calls['count'], 3)  # 恰好重试 3 次
         finally:
-            n.fetch_content_from_official = original_fetch
             n.time.sleep = original_sleep
+
+    def test_success_stops_retry(self):
+        original_sleep = n.time.sleep
+        calls = {'count': 0}
+
+        class FakeSite:
+            def fetch_chapter(self, item_id):
+                calls['count'] += 1
+                return '正文内容'
+
+        n.time.sleep = lambda seconds: None
+        try:
+            result = n._fetch_with_retry(FakeSite(), '123')
+            self.assertEqual(result, '正文内容')
+            self.assertEqual(calls['count'], 1)  # 首次成功即返回
+        finally:
+            n.time.sleep = original_sleep
+
+
+class TestFanqieSite(unittest.TestCase):
+    """番茄适配器：目录解析与元信息提取（mock fetch_url，不依赖网络）"""
+
+    FAKE_CATALOG_HTML = '''<html><body>
+        <h1>测试书名</h1>
+        <div class="author-name"><span class="author-name-text">作者甲</span></div>
+        <div class="page-abstract-content"><p>这是一本测试书</p></div>
+        <div class="chapter-item"><a href="https://fanqienovel.com/reader/1001">第一章 起点</a></div>
+        <div class="chapter-item"><a href="https://fanqienovel.com/reader/1002">第二章 发展</a></div>
+        <div class="chapter-item"><a href="https://fanqienovel.com/reader/1003">第三章 高潮</a></div>
+    </body></html>'''
+
+    def setUp(self):
+        self.original_fetch_url = n.fetch_url
+        n.fetch_url = lambda url, headers=None, timeout=10, max_retries=3: type(
+            'FakeResponse', (), {'status_code': 200, 'text': self.FAKE_CATALOG_HTML})()
+        self.site = n.FanqieSite()
+        self.site.make_headers = lambda: {'User-Agent': 'test', 'Cookie': 'novel_web_id=1'}
+
+    def tearDown(self):
+        n.fetch_url = self.original_fetch_url
+
+    def test_fetch_catalog_returns_chapter_refs(self):
+        catalog = self.site.fetch_catalog('book123')
+        self.assertEqual(len(catalog), 3)
+        self.assertEqual(catalog[0].index, 0)
+        self.assertEqual(catalog[0].title, '第一章 起点')
+        self.assertEqual(catalog[0].item_id, '1001')
+        self.assertEqual(catalog[2].item_id, '1003')
+
+    def test_get_book_info_parses_meta(self):
+        info = self.site.get_book_info('book123')
+        self.assertIsNotNone(info)
+        self.assertEqual(info.name, '测试书名')
+        self.assertEqual(info.author, '作者甲')
+        self.assertEqual(info.description, '这是一本测试书')
+
+    def test_fetch_catalog_failure_returns_empty(self):
+        n.fetch_url = lambda url, headers=None, timeout=10, max_retries=3: None
+        self.assertEqual(self.site.fetch_catalog('book123'), [])
+
+
+class TestSiteRegistry(unittest.TestCase):
+    """站点注册表与 Run 站点参数"""
+
+    def test_fanqie_registered(self):
+        self.assertIn('fanqie', n.SITE_REGISTRY)
+        self.assertIs(n.SITE_REGISTRY['fanqie'], n.FanqieSite)
+
+    def test_run_rejects_unknown_site(self):
+        # 未知站点应在发起任何网络请求前直接返回
+        with tempfile.TemporaryDirectory() as tmp:
+            n.Run('123', tmp, site='unknown_site')  # 不应抛异常
 
 
 if __name__ == '__main__':

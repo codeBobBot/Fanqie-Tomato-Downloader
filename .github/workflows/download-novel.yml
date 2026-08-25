@@ -4,8 +4,19 @@ on:
   workflow_dispatch:  # 允许手动触发工作流
     inputs:
       novel_id:
-        description: '小说ID (从番茄小说URL中获取)'
+        description: '小说ID (从小说URL中获取)'
         required: true
+      site:
+        description: '小说网站'
+        required: true
+        type: choice
+        options:
+          - fanqie
+        default: 'fanqie'
+      chapter_range:
+        description: '下载范围 (留空=全部 | N=仅第N章 | 1-N=前N章)'
+        required: false
+        default: ''
       threads:
         description: '下载线程数 (1-10)'
         required: true
@@ -57,11 +68,13 @@ jobs:
 
           # 获取参数
           novel_id = sys.argv[1]
-          output_format = sys.argv[2].lower()
+          site = sys.argv[2]
+          chapter_range = sys.argv[3]
+          output_format = sys.argv[4].lower()
           if output_format not in ("txt", "epub"):
               print(f"不支持的输出格式: {output_format}（可选：txt / epub）")
               sys.exit(1)
-          threads = max(1, min(int(sys.argv[3]), 10))
+          threads = max(1, min(int(sys.argv[5]), 10))
           save_path = "novel_output"
 
           # 确保输出目录存在
@@ -78,10 +91,12 @@ jobs:
 
           # 启动下载
           print(f"开始下载小说 ID: {novel_id}")
+          print(f"小说网站: {site}")
+          print(f"下载范围: {chapter_range if chapter_range else '全部章节'}")
           print(f"保存路径: {save_path}")
           print(f"使用线程数: {threads}")
           print(f"输出格式: {output_format}")
-          novel_downloader.Run(novel_id, save_path)
+          novel_downloader.Run(novel_id, save_path, chapter_range or None, site)
           print("下载完成！")
 
           # 列出下载的文件
@@ -95,7 +110,7 @@ jobs:
       - name: 下载小说
         run: |
           echo "开始下载小说..."
-          python download_novel.py "${{ inputs.novel_id }}" "${{ inputs.format }}" "${{ inputs.threads }}"
+          python download_novel.py "${{ inputs.novel_id }}" "${{ inputs.site }}" "${{ inputs.chapter_range }}" "${{ inputs.format }}" "${{ inputs.threads }}"
           
       - name: 压缩下载结果
         run: |

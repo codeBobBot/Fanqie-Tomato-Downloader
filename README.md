@@ -9,6 +9,7 @@
 - 简洁易用的图形界面
 - 支持多线程下载加速
 - 支持指定章节范围下载（单章或前N章）
+- 多站点适配器架构，便于扩展更多小说网站（当前内置：番茄小说）
 - 提供在线下载功能，无需本地环境
 
 ## 使用方法
@@ -21,10 +22,11 @@
 2. 在左侧选择"在线下载小说"工作流
 3. 点击"Run workflow"按钮
 4. 填写以下信息：
-   - 小说ID（从番茄小说网址中获取，例如：https://fanqienovel.com/page/7105916563 中的7105916563）
+   - 小说ID（从小说网址中获取，例如：https://fanqienovel.com/page/7105916563 中的7105916563）
+   - 小说网站（当前仅支持`fanqie`，即番茄小说）
+   - 下载范围（可留空=全部；填`N`仅下载第N章；填`1-N`下载前N章）
    - 下载线程数（默认为5，可选1-10）
    - 输出格式（选择txt或epub）
-   - 下载范围（可留空=全部；填`N`仅下载第N章；填`1-N`下载前N章）
 5. 点击"Run workflow"开始下载
 6. 下载完成后，点击运行记录中的"Summary"标签
 7. 在"Artifacts"部分找到并下载小说文件（文件保存期限为7天）
@@ -92,6 +94,22 @@ python gui.py
 - 填 `1-N`（如 `1-30`）：下载前30章
 
 命令行版本会在下载前询问同样的范围。
+
+### 如何扩展支持其他小说网站？
+
+项目采用"站点适配器"架构：只需实现 `NovelSite` 接口（`make_headers` / `get_book_info` / `fetch_catalog` / `fetch_chapter`）并注册到 `SITE_REGISTRY` 即可接入新网站。请求重试、文件名安全、章节范围、多线程、文件输出等能力自动复用。
+
+```python
+class QiMaoSite(NovelSite):  # 示例：新站点适配器
+    name = "qimao"
+    display_name = "七猫小说"
+    def make_headers(self): ...
+    def get_book_info(self, book_id): ...
+    def fetch_catalog(self, book_id): ...
+    def fetch_chapter(self, item_id): ...
+
+SITE_REGISTRY["qimao"] = QiMaoSite  # 注册后 GUI/CLI 自动出现该站点
+```
 
 ### 下载的文件在哪里？
 
