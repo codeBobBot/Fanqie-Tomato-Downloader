@@ -29,10 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v3
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         
       - name: 设置Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: '3.10'
           cache: 'pip'
@@ -58,14 +58,17 @@ jobs:
           # 获取参数
           novel_id = sys.argv[1]
           output_format = sys.argv[2].lower()
-          threads = int(sys.argv[3])
+          if output_format not in ("txt", "epub"):
+              print(f"不支持的输出格式: {output_format}（可选：txt / epub）")
+              sys.exit(1)
+          threads = max(1, min(int(sys.argv[3]), 10))
           save_path = "novel_output"
 
           # 确保输出目录存在
           os.makedirs(save_path, exist_ok=True)
 
-          # 导入2.py中的函数
-          spec = importlib.util.spec_from_file_location("novel_downloader", "2.py")
+          # 导入核心引擎中的函数
+          spec = importlib.util.spec_from_file_location("novel_downloader", "novel_downloader.py")
           novel_downloader = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(novel_downloader)
 
@@ -92,16 +95,16 @@ jobs:
       - name: 下载小说
         run: |
           echo "开始下载小说..."
-          python download_novel.py "${{ github.event.inputs.novel_id }}" "${{ github.event.inputs.format }}" "${{ github.event.inputs.threads }}"
+          python download_novel.py "${{ inputs.novel_id }}" "${{ inputs.format }}" "${{ inputs.threads }}"
           
       - name: 压缩下载结果
         run: |
           cd novel_output && zip -r ../novel_files.zip *
           
       - name: 上传下载结果
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: novel-${{ github.event.inputs.novel_id }}-${{ github.event.inputs.format }}
+          name: novel-${{ inputs.novel_id }}-${{ inputs.format }}
           path: novel_files.zip
           retention-days: 7  # 文件保存7天
           

@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # GitHub Actions：每周检查一次更新（固定 SHA 的依赖由 Dependabot 生成 PR 升级）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 升级 Actions 时生成 PR 标题前缀
+    commit-message:
+      prefix: "ci"
+
+  # pip 依赖：每周检查一次
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"

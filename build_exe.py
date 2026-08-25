@@ -15,7 +15,7 @@ args = [
     '--windowed',
     '--clean',
     # '--icon=' + icon_path,  # 如果有图标文件，取消此行注释
-    '--add-data=2.py;.',
+    '--add-data=novel_downloader.py;.',
     '--add-data=cookie.json;.',  # 添加cookie文件
     '--hidden-import=requests',
     '--hidden-import=bs4',

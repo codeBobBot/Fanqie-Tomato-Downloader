@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v3
         
       - name: 设置Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: '3.10'
           cache: 'pip'
@@ -38,22 +38,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           
+      - name: 运行单元测试
+        run: |
+          pip install pytest -q
+          python -m pytest tests/ -v
+          
       - name: 确保cookie.json存在
         run: |
           if (-not (Test-Path -Path "./cookie.json")) {
             '""' | Out-File -FilePath "./cookie.json" -Encoding utf8
           }
-          
-      - name: 准备构建脚本
-        run: |
-          # 确保build_exe.py中包含ebooklib.epub
-          (Get-Content build_exe.py) | ForEach-Object {
-            if ($_ -match "--hidden-import=ebooklib',") {
-              $_ -replace "--hidden-import=ebooklib',", "--hidden-import=ebooklib',`n    '--hidden-import=ebooklib.epub',  # 明确导入epub子模块"
-            } else {
-              $_
-            }
-          } | Set-Content build_exe.py
           
       - name: 构建Windows可执行文件
         run: |
@@ -64,14 +58,14 @@ jobs:
           Compress-Archive -Path dist/番茄小说下载器.exe -DestinationPath Fanqie-Novel-Downloader-Windows.zip
           
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-build
           path: Fanqie-Novel-Downloader-Windows.zip
           
       - name: 上传至已存在的Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: Fanqie-Novel-Downloader-Windows.zip
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -84,7 +78,7 @@ jobs:
         uses: actions/checkout@v3
         
       - name: 设置Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: '3.10'
           cache: 'pip'
@@ -94,6 +88,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           
+      - name: 运行单元测试
+        run: |
+          pip install pytest -q
+          python -m pytest tests/ -v
+          
       - name: 确保cookie.json存在
         run: |
           if [ ! -f "./cookie.json" ]; then
@@ -102,14 +101,9 @@ jobs:
           
       - name: 准备构建脚本
         run: |
-          # 修改为macOS格式的路径分隔符
-          sed -i '' 's/--add-data=2.py;./--add-data=2.py:./' build_exe.py
+          # 修改为macOS格式的路径分隔符（build_exe.py 使用 Windows 的 ; 分隔符）
+          sed -i '' 's/--add-data=novel_downloader.py;./--add-data=novel_downloader.py:./' build_exe.py
           sed -i '' 's/--add-data=cookie.json;./--add-data=cookie.json:./' build_exe.py
-          
-          # 确保包含ebooklib.epub
-          if ! grep -q -- "--hidden-import=ebooklib.epub" build_exe.py; then
-            sed -i '' 's/--hidden-import=ebooklib'"'"',/--hidden-import=ebooklib'"'"',\n    '"'"'--hidden-import=ebooklib.epub'"'"',  # 明确导入epub子模块/' build_exe.py
-          fi
           
       - name: 构建MacOS可执行文件
         run: |
@@ -120,14 +114,14 @@ jobs:
           cd dist && zip -r ../Fanqie-Novel-Downloader-MacOS.zip 番茄小说下载器
           
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-build
           path: Fanqie-Novel-Downloader-MacOS.zip
           
       - name: 上传至已存在的Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: Fanqie-Novel-Downloader-MacOS.zip
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -140,7 +134,7 @@ jobs:
         uses: actions/checkout@v3
         
       - name: 设置Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: '3.10'
           cache: 'pip'
@@ -150,6 +144,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           
+      - name: 运行单元测试
+        run: |
+          pip install pytest -q
+          python -m pytest tests/ -v
+          
       - name: 确保cookie.json存在
         run: |
           if [ ! -f "./cookie.json" ]; then
@@ -158,14 +157,9 @@ jobs:
           
       - name: 准备构建脚本
         run: |
-          # 修改为Linux格式的路径分隔符
-          sed -i 's/--add-data=2.py;./--add-data=2.py:./' build_exe.py
+          # 修改为Linux格式的路径分隔符（build_exe.py 使用 Windows 的 ; 分隔符）
+          sed -i 's/--add-data=novel_downloader.py;./--add-data=novel_downloader.py:./' build_exe.py
           sed -i 's/--add-data=cookie.json;./--add-data=cookie.json:./' build_exe.py
-          
-          # 确保包含ebooklib.epub
-          if ! grep -q -- "--hidden-import=ebooklib.epub" build_exe.py; then
-            sed -i 's/--hidden-import=ebooklib'"'"',/--hidden-import=ebooklib'"'"',\n    '"'"'--hidden-import=ebooklib.epub'"'"',  # 明确导入epub子模块/' build_exe.py
-          fi
           
       - name: 构建Linux可执行文件
         run: |
@@ -176,14 +170,14 @@ jobs:
           cd dist && zip -r ../Fanqie-Novel-Downloader-Linux.zip 番茄小说下载器
           
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-build
           path: Fanqie-Novel-Downloader-Linux.zip
           
       - name: 上传至已存在的Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: Fanqie-Novel-Downloader-Linux.zip
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -195,33 +189,33 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     steps:
       - name: 下载Windows构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-build
           
       - name: 下载MacOS构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-build
           
       - name: 下载Linux构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: linux-build
           
       - name: 创建Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ github.event.inputs.version }}
-          name: Fanqie Novel Downloader ${{ github.event.inputs.version }}
+          tag_name: ${{ inputs.version }}
+          name: Fanqie Novel Downloader ${{ inputs.version }}
           body: |
-            Fanqie Novel Downloader ${{ github.event.inputs.version }} Release
+            Fanqie Novel Downloader ${{ inputs.version }} Release
             
             ### Features
             - Download novels from Fanqie and export as TXT or EPUB format
             - Support multi-threaded downloading for acceleration
-            - Automatically fix ebooklib.epub module import issues
+            - CI quality gate: unit tests pass before packaging
             
             ### Downloads
             - Windows: Fanqie-Novel-Downloader-Windows.zip
@@ -232,4 +226,4 @@ jobs:
             Fanqie-Novel-Downloader-MacOS.zip
             Fanqie-Novel-Downloader-Linux.zip
           draft: false
-          prerelease: ${{ github.event.inputs.prerelease }}
+          prerelease: ${{ inputs.prerelease }}

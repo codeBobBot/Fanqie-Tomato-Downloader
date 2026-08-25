@@ -1,32 +1,46 @@
-# 编译的Python文件
+# ============ Python 运行产物 ============
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints
 
-# 分发/打包
+# ============ 打包 / 构建产物 ============
 dist/
 build/
 *.egg-info/
 *.egg
 MANIFEST
-
-# PyInstaller
 *.manifest
 *.spec
 
-# 环境目录
+# ============ 虚拟环境 ============
 venv/
+.venv/
 env/
 ENV/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# ============ 用户凭证（含 Cookie，禁止提交） ============
+cookie.json
+cookie.example.json
 
-# VSCode
+# ============ 下载输出 ============
+# 小说下载产物（txt/epub），保留 requirements.txt
+*.txt
+!requirements.txt
+*.epub
+下载的小说/
+novels/
+novel_output/
+
+# ============ IDE / 编辑器 ============
 .vscode/
 *.code-workspace
+.idea/
 
-# 操作系统生成的文件
+# ============ 操作系统 ============
 .DS_Store
 .DS_Store?
 ._*
@@ -35,12 +49,8 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
-# 日志文件
+# ============ 日志 ============
 *.log
 
-# 下载的小说文件
-*.txt
-!requirements.txt
-*.epub
-下载的小说/
-novels/
+# ============ CodeBuddy 本地数据（记忆/团队状态） ============
+.codebuddy/

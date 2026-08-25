@@ -4,66 +4,52 @@ import threading
 import os
 import sys
 import time
+import queue
 from tqdm import tqdm
 import importlib.util
 
-# 获取正确的2.py文件路径
+# 获取正确的核心引擎文件路径
 def get_script_path():
     if getattr(sys, 'frozen', False):
         # 如果是打包后的环境
-        return os.path.join(sys._MEIPASS, "2.py")
+        return os.path.join(sys._MEIPASS, "novel_downloader.py")
     else:
         # 如果是开发环境
-        return "2.py"
+        return "novel_downloader.py"
 
-# 导入2.py中的函数
+# 导入核心引擎中的函数
 script_path = get_script_path()
 spec = importlib.util.spec_from_file_location("novel_downloader", script_path)
 novel_downloader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(novel_downloader)
 
 class RedirectText:
-    """用于重定向输出到GUI的类"""
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-        self.buffer = ""
+    """将下载线程的输出写入消息队列，由 GUI 主线程轮询显示，避免跨线程操作 UI"""
+    def __init__(self, msg_queue):
+        self.msg_queue = msg_queue
 
     def write(self, string):
-        self.buffer += string
-        # 在UI线程上安全更新
-        self.text_widget.after(10, self.update_text_widget)
-    
-    def update_text_widget(self):
-        self.text_widget.config(state=tk.NORMAL)
-        self.text_widget.insert(tk.END, self.buffer)
-        self.text_widget.see(tk.END)  # 自动滚动到最新内容
-        self.text_widget.config(state=tk.DISABLED)
-        self.buffer = ""
+        self.msg_queue.put(("log", string))
 
     def flush(self):
         pass
 
 class CustomTqdm(tqdm):
-    """自定义tqdm进度条，将更新发送到GUI"""
-    def __init__(self, *args, progress_var=None, progress_label=None, **kwargs):
+    """自定义tqdm进度条，将更新通过消息队列发送到GUI，避免跨线程直接操作UI"""
+    def __init__(self, *args, progress_queue=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.progress_var = progress_var
-        self.progress_label = progress_label
+        self.progress_queue = progress_queue
         self._last_update_time = 0
-        self._update_interval = 0.1  # 更新UI的间隔时间（秒）
+        self._update_interval = 0.1  # 更新UI的间隔时间（秒），避免UI卡顿
 
     def update(self, n=1):
         displayed = super().update(n)
-        # 限制更新频率，避免UI卡顿
+        # 限制更新频率
         current_time = time.time()
         if current_time - self._last_update_time > self._update_interval:
-            if self.progress_var and hasattr(self.progress_var, 'set'):
-                # 在主线程中更新UI
+            if self.progress_queue is not None:
                 percentage = int(self.n / self.total * 100) if self.total else 0
-                self.progress_var.set(percentage)
-                if self.progress_label:
-                    text = f"下载进度: {percentage}% ({self.n}/{self.total})"
-                    self.progress_label.configure(text=text)
+                self.progress_queue.put(("progress", percentage, self.n, self.total))
             self._last_update_time = current_time
         return displayed
 
@@ -216,14 +202,18 @@ class NovelDownloaderGUI(tk.Tk):
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state=tk.DISABLED)
         
-        # 重定向标准输出到日志文本框
-        self.stdout_redirect = RedirectText(self.log_text)
+        # 通过消息队列与下载线程通信，避免跨线程直接操作UI
+        self.msg_queue = queue.Queue()
+        self.stdout_redirect = RedirectText(self.msg_queue)
         sys.stdout = self.stdout_redirect
         
-        # 替换tqdm类，使其更新GUI进度条
+        # 替换tqdm类，使其通过消息队列更新GUI进度条
         novel_downloader.tqdm = lambda *args, **kwargs: CustomTqdm(
-            *args, **kwargs, progress_var=self.progress_var, progress_label=self.progress_label
+            *args, **kwargs, progress_queue=self.msg_queue
         )
+        
+        # 启动主线程消息轮询
+        self.after(50, self.poll_queue)
         
         # 设置线程数和输出格式
         threads = int(self.threads_var.get())
@@ -236,6 +226,28 @@ class NovelDownloaderGUI(tk.Tk):
         self.download_thread.daemon = True
         self.download_thread.start()
         
+    def poll_queue(self):
+        """主线程轮询消息队列，安全更新UI"""
+        drained = False
+        try:
+            while True:
+                msg = self.msg_queue.get_nowait()
+                drained = True
+                if msg[0] == "log":
+                    self.log_text.config(state=tk.NORMAL)
+                    self.log_text.insert(tk.END, msg[1])
+                    self.log_text.see(tk.END)
+                    self.log_text.config(state=tk.DISABLED)
+                elif msg[0] == "progress":
+                    _, percentage, n, total = msg
+                    self.progress_var.set(percentage)
+                    self.progress_label.configure(text=f"下载进度: {percentage}% ({n}/{total})")
+        except queue.Empty:
+            pass
+        # 下载中或仍有未处理消息时继续轮询
+        if self.is_downloading or drained:
+            self.after(50, self.poll_queue)
+
     def run_download(self, book_id, save_path, output_format):
         try:
             print(f"开始下载小说 ID: {book_id}")
@@ -246,13 +258,14 @@ class NovelDownloaderGUI(tk.Tk):
             self.after(100, self.download_complete, "下载完成！")
         except Exception as e:
             self.after(100, self.download_complete, f"下载出错: {str(e)}")
-            
+        finally:
+            # 无论成功失败都恢复标准输出
+            sys.stdout = sys.__stdout__
+
     def download_complete(self, message):
         self.is_downloading = False
         self.download_button.config(text="开始下载", state=tk.NORMAL)
         self.progress_label.config(text=message)
-        # 恢复标准输出
-        sys.stdout = sys.__stdout__
         messagebox.showinfo("下载状态", message)
     
     def install_ebooklib(self):
@@ -263,6 +276,13 @@ class NovelDownloaderGUI(tk.Tk):
             self.log_text.insert(tk.END, "正在安装ebooklib库...\n")
             self.log_text.config(state=tk.DISABLED)
             
+            # 打包后的可执行环境中 sys.executable 是 exe 本身，无法用 -m pip
+            if getattr(sys, 'frozen', False):
+                self.log_text.config(state=tk.NORMAL)
+                self.log_text.insert(tk.END, "当前为打包版本，请手动安装：pip install ebooklib\n")
+                self.log_text.config(state=tk.DISABLED)
+                return
+
             import subprocess
             result = subprocess.run([sys.executable, "-m", "pip", "install", "ebooklib"],
                                   capture_output=True, text=True)

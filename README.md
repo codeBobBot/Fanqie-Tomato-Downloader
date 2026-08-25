@@ -40,7 +40,7 @@
 1. 克隆仓库：
 ```bash
 git clone https://github.com/POf-L/Fanqie-Tomato-Downloader.git
-cd Tomato-Novel-Downloader-Lite
+cd Fanqie-Tomato-Downloader
 ```
 
 2. 安装依赖：
