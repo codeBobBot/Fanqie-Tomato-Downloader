@@ -56,7 +56,7 @@ class CustomTqdm(tqdm):
 class NovelDownloaderGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("番茄小说下载器")
+        self.title("通用小说下载器")
         self.geometry("800x600")
         self.resizable(True, True)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -68,6 +68,9 @@ class NovelDownloaderGUI(tk.Tk):
         self.create_widgets()
         self.is_downloading = False
         self.download_thread = None
+
+        # 回填已保存的登录 Cookie（若 cookie.json 中存在登录态）
+        self.load_saved_login()
         
         # 设置图标（如果有的话）
         try:
@@ -84,51 +87,63 @@ class NovelDownloaderGUI(tk.Tk):
         input_frame = ttk.LabelFrame(main_frame, text="输入信息", padding="10")
         input_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # 小说ID输入
-        ttk.Label(input_frame, text="小说ID:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        self.book_id_entry = ttk.Entry(input_frame, width=50)
-        self.book_id_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(input_frame, text="(从小说网址中获取)").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
-        
         # 小说网站选择
-        ttk.Label(input_frame, text="小说网站:").grid(row=0, column=3, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="小说网站:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
         self.site_combo = ttk.Combobox(input_frame, textvariable=self.site_var,
                                        values=list(novel_downloader.SITE_REGISTRY),
-                                       state="readonly", width=10)
-        self.site_combo.grid(row=0, column=4, sticky=tk.W, padx=5, pady=5)
+                                       state="readonly", width=30)
+        self.site_combo.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+
+        # 小说ID输入
+        ttk.Label(input_frame, text="小说ID:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.book_id_entry = ttk.Entry(input_frame, width=50)
+        self.book_id_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="(从小说网址中获取)").grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
         
         # 保存路径输入
-        ttk.Label(input_frame, text="保存路径:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="保存路径:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
         self.save_path_entry = ttk.Entry(input_frame, width=50)
-        self.save_path_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        self.save_path_entry.grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
         self.save_path_entry.insert(0, os.path.join(os.getcwd(), "novels"))
         browse_button = ttk.Button(input_frame, text="浏览", command=self.browse_folder)
-        browse_button.grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
+        browse_button.grid(row=2, column=2, sticky=tk.W, padx=5, pady=5)
         
         # 线程数选择
-        ttk.Label(input_frame, text="线程数:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="线程数:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
         threads_frame = ttk.Frame(input_frame)
-        threads_frame.grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+        threads_frame.grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
         for i in range(1, 11):
             ttk.Radiobutton(threads_frame, text=str(i), value=str(i), variable=self.threads_var).pack(side=tk.LEFT, padx=2)
         
         # 输出格式选择
-        ttk.Label(input_frame, text="输出格式:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="输出格式:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
         format_frame = ttk.Frame(input_frame)
-        format_frame.grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
+        format_frame.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Radiobutton(format_frame, text="TXT", value="txt", variable=self.format_var).pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(format_frame, text="EPUB", value="epub", variable=self.format_var).pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(format_frame, text="分章节TXT", value="chapter", variable=self.format_var).pack(side=tk.LEFT, padx=10)
         
         # 下载范围输入
-        ttk.Label(input_frame, text="下载范围:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="下载范围:").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
         self.range_entry = ttk.Entry(input_frame, width=20)
-        self.range_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(input_frame, text="(留空=全部 | N=仅第N章 | 1-N=前N章)").grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
+        self.range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="(留空=全部 | N=仅第N章 | N-M=第N到M章)").grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+        
+        # 登录 Cookie 与 User-Agent（可选，留空=游客模式；登录后可下载被锁定的章节）
+        ttk.Label(input_frame, text="登录Cookie:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
+        self.cookie_entry = ttk.Entry(input_frame, width=40)
+        self.cookie_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        clear_button = ttk.Button(input_frame, text="清除Cookie", command=self.clear_cookie)
+        clear_button.grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="User-Agent:").grid(row=7, column=0, sticky=tk.W, padx=5, pady=5)
+        self.ua_entry = ttk.Entry(input_frame, width=50)
+        self.ua_entry.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(input_frame, text="(可选) 浏览器 F12→Network→请求头 复制 Cookie 与 User-Agent；登录后可解锁锁定章节，留空=游客模式").grid(
+            row=8, column=1, columnspan=3, sticky=tk.W, padx=5, pady=2)
         
         # 下载按钮
         self.download_button = ttk.Button(input_frame, text="开始下载", command=self.start_download)
-        self.download_button.grid(row=5, column=1, pady=10)
+        self.download_button.grid(row=9, column=1, pady=10)
         
         # 进度条区域
         progress_frame = ttk.LabelFrame(main_frame, text="下载进度", padding="10")
@@ -218,7 +233,25 @@ class NovelDownloaderGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("错误", f"创建保存路径失败: {str(e)}")
             return
-            
+
+        # 登录 Cookie 校验与持久化（留空=游客模式；已保存的登录态自动生效）
+        login_cookie = self.cookie_entry.get().strip()
+        login_ua = self.ua_entry.get().strip()
+        if login_cookie:
+            ok, msg = novel_downloader.verify_login_cookie(login_cookie, login_ua)
+            if not ok:
+                if msg.startswith("网络"):
+                    messagebox.showerror("验证失败", f"无法验证登录 Cookie（{msg}）。\n请确认网络连接正常后重试。")
+                else:
+                    messagebox.showerror("Cookie 无效",
+                                         f"登录 Cookie 验证失败：{msg}\n\n请重新从浏览器复制 Cookie 与 User-Agent"
+                                         "（F12 → Network → 任意请求 → Request Headers → 复制 Cookie 和 User-Agent 两行）。")
+                return
+            novel_downloader.save_login_cookie(login_cookie, login_ua)
+        elif novel_downloader.load_login_credentials():
+            # 未填写但文件已有登录态：保留并使用（引擎自动加载）
+            pass
+
         # 准备下载
         self.is_downloading = True
         self.download_button.config(text="下载中...", state=tk.DISABLED)
@@ -277,6 +310,29 @@ class NovelDownloaderGUI(tk.Tk):
         if self.is_downloading or drained:
             self.after(50, self.poll_queue)
 
+    def load_saved_login(self):
+        """启动时若 cookie.json 保存了登录态，则回填 Cookie 与 UA 输入框"""
+        try:
+            creds = novel_downloader.load_login_credentials()
+        except Exception:
+            creds = None
+        if creds:
+            self.cookie_entry.insert(0, creds[0])
+            self.ua_entry.insert(0, creds[1] or "")
+
+    def clear_cookie(self):
+        """清除 cookie.json 与输入框内容，回退游客模式"""
+        try:
+            novel_downloader.clear_cookie_file()
+        except Exception as e:
+            messagebox.showerror("错误", f"清除 Cookie 失败: {e}")
+            return
+        self.cookie_entry.delete(0, tk.END)
+        self.ua_entry.delete(0, tk.END)
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, "已清除登录 Cookie，回退游客模式。\n")
+        self.log_text.config(state=tk.DISABLED)
+
     def run_download(self, book_id, save_path, output_format, chapter_range="", site="fanqie"):
         try:
             print(f"开始下载小说 ID: {book_id}")
@@ -285,6 +341,9 @@ class NovelDownloaderGUI(tk.Tk):
             print(f"使用线程数: {novel_downloader.MAX_WORKERS}")
             print(f"输出格式: {output_format}")
             print(f"下载范围: {chapter_range if chapter_range else '全部章节'}")
+            mode = ("登录模式（保守限速 ≤2 线程 / 1~3s 请求间隔）"
+                    if novel_downloader.FanqieSite.is_login_mode() else "游客模式")
+            print(f"运行模式: {mode}")
             novel_downloader.Run(book_id, save_path, chapter_range or None, site)
             self.after(100, self.download_complete, "下载完成！")
         except Exception as e:

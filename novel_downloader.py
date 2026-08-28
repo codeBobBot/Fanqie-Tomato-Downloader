@@ -4,6 +4,7 @@
 公共层（请求重试/文件名安全/章节范围/写文件/多线程归位/日志）对所有站点复用。
 """
 import time
+import threading
 import requests
 import bs4
 import re
@@ -21,7 +22,7 @@ from tqdm import tqdm
 cookie_path = "cookie.json"
 MAX_WORKERS = 5  # 默认线程数
 OUTPUT_FORMAT = "txt"  # 默认输出格式：txt（单文件）或 chapter（每章一个文件）
-CHAPTER_RANGE: Optional[str] = None  # 默认下载全部章节；'N'=仅第N章，'1-N'=前N章
+CHAPTER_RANGE: Optional[str] = None  # 默认下载全部章节；'N'=仅第N章，'N-M'=第N到M章
 
 
 def log(*args):
@@ -37,6 +38,56 @@ def get_random_user_agent() -> str:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36 Edg/93.0.961.47",
     ]
     return random.choice(user_agents)
+
+
+class RateLimiter:
+    """跨线程共享的请求节流器：保证全局请求间隔不低于 min_interval，降低触发风控的概率"""
+
+    def __init__(self, min_interval: float = 0.0):
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def acquire(self) -> None:
+        """请求前调用；距上次请求不足 min_interval 则阻塞补齐（线程安全）"""
+        with self._lock:
+            now = time.monotonic()
+            wait = self._last + self.min_interval - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+            self._last = now
+
+
+_global_rate_limiter: Optional[RateLimiter] = None
+
+
+def get_rate_limiter() -> RateLimiter:
+    """返回全局节流器单例，并按当前模式同步间隔配置（登录态 1~3s，游客态 0.1~0.3s）"""
+    global _global_rate_limiter
+    if _global_rate_limiter is None:
+        _global_rate_limiter = RateLimiter(request_interval_seconds())
+    else:
+        _global_rate_limiter.min_interval = request_interval_seconds()
+    return _global_rate_limiter
+
+
+def request_interval_seconds() -> float:
+    """登录态下 1~3 秒（模拟真人阅读节奏）；游客态保持 0.1~0.3 秒"""
+    if FanqieSite.is_login_mode():
+        return random.uniform(1.0, 3.0)
+    return random.uniform(0.1, 0.3)
+
+
+def effective_workers(requested: int) -> int:
+    """登录态并发封顶 2，游客态封顶 10（保护账号，避免高频并发触发风控）"""
+    try:
+        requested = int(requested)
+    except (TypeError, ValueError):
+        return 2 if FanqieSite.is_login_mode() else 5
+    if FanqieSite.is_login_mode():
+        return max(1, min(requested, 2))
+    return max(1, min(requested, 10))
 
 
 # =========================== 数据模型 ===========================
@@ -80,7 +131,8 @@ class NovelSite(ABC):
 
     @abstractmethod
     def fetch_chapter(self, item_id: str) -> Optional[str]:
-        """获取单章正文（单次获取，重试由引擎统一处理）；失败返回 None"""
+        """获取单章正文（单次获取，重试由引擎统一处理）；失败返回 None；
+        章节被锁定（VIP/需登录）时抛 ChapterLockedError 以跳过无效重试"""
 
 
 # =========================== 通用工具 ===========================
@@ -125,7 +177,7 @@ def safe_title(titles: List[str], i: int) -> str:
 
 def parse_chapter_range(range_str: Optional[str]) -> Optional[Tuple[int, int]]:
     """解析下载范围字符串，返回 0-based 半开区间 [start, end)
-    支持格式：''/None=全部；'N'=仅第N章；'1-N'=前N章
+    支持格式：''/None=全部；'N'=仅第N章；'N-M'=下载第N到M章（含两端）
     格式非法、编号小于 1、区间倒置时抛出 ValueError"""
     if range_str is None:
         return None
@@ -134,18 +186,16 @@ def parse_chapter_range(range_str: Optional[str]) -> Optional[Tuple[int, int]]:
         return None
     m = re.fullmatch(r'(\d+)(?:\s*-\s*(\d+))?', s)
     if not m:
-        raise ValueError(f"下载范围格式不合法: {s!r}（支持：留空=全部、N=仅第N章、1-N=前N章）")
+        raise ValueError(f"下载范围格式不合法: {s!r}（支持：留空=全部、N=仅第N章、N-M=下载第N到M章）")
     start = int(m.group(1))
     end = int(m.group(2)) if m.group(2) else None
     if start < 1:
         raise ValueError(f"下载范围格式不合法: {s!r}（章节编号从 1 开始）")
     if end is None:
         return start - 1, start  # 单章 [N-1, N)
-    if start != 1:
-        raise ValueError(f"下载范围格式不合法: {s!r}（仅支持 1-N 表示前N章）")
     if end < start:
         raise ValueError(f"下载范围格式不合法: {s!r}（结束章节不能小于起始章节）")
-    return 0, end  # 前N章 [0, N)
+    return start - 1, end  # 区间 [N-1, M)
 
 
 def write_txt(save_path: str, book_name: str, author_name: Optional[str], description: Optional[str],
@@ -283,6 +333,24 @@ class FanqieSite(NovelSite):
                 '任']
 
     _cookie_cache: Optional[str] = None  # 类级 Cookie 缓存，所有实例共享
+    _login_cookie_cache: Optional[str] = None  # 类级登录态 Cookie 缓存（登录优先于游客）
+    _login_ua_cache: Optional[str] = None  # 类级登录态 UA 缓存（与 Cookie 配套，防止设备指纹不一致）
+
+    _LOGIN_COOKIE_MARKERS = ('sessionid', 'passport_csrf_token', 'ttwid', 'sid_tt')
+
+    def __init__(self) -> None:
+        self._session_ua: Optional[str] = None  # 会话固定 UA：首次确定后整次下载复用，不再每请求随机
+
+    @classmethod
+    def is_login_mode(cls) -> bool:
+        """是否处于登录态（存在登录 Cookie 缓存）"""
+        return bool(cls._login_cookie_cache)
+
+    @classmethod
+    def _looks_like_login(cls, cookie: str) -> bool:
+        """通过登录特征字段判断 Cookie 是否携带登录态"""
+        lower = cookie.lower()
+        return any(marker in lower for marker in cls._LOGIN_COOKIE_MARKERS)
 
     # ---------- Cookie 与请求头 ----------
 
@@ -293,23 +361,23 @@ class FanqieSite(NovelSite):
         return 'novel_web_id=' + str(novel_web_id)
 
     def _get_cookie(self, force: bool = False) -> Optional[str]:
-        """获取或生成 Cookie（类级缓存 + 本地文件缓存，避免每个请求都重新生成）"""
+        """获取或生成 Cookie（类级缓存 + 本地文件缓存，避免每个请求都重新生成）
+        优先级：登录态 > 文件游客态 > 新生成游客态"""
         cache = type(self)._cookie_cache
         if not force and cache:
             return cache
 
-        # 先尝试读取本地缓存的 Cookie 文件
+        # 先尝试读取本地缓存的 Cookie 文件（支持登录态/游客态/旧版纯字符串）
         if not force:
-            try:
-                with open(cookie_path, 'r', encoding='utf-8') as f:
-                    cached = json.load(f)
-                if isinstance(cached, str) and cached.startswith('novel_web_id='):
-                    type(self)._cookie_cache = cached
-                    return cached
-            except Exception:
-                pass
+            cookie, ua = _parse_cookie_file()
+            if cookie:
+                type(self)._cookie_cache = cookie
+                if self._looks_like_login(cookie):
+                    type(self)._login_cookie_cache = cookie
+                    type(self)._login_ua_cache = ua
+                return cookie
 
-        # 生成并验证新 Cookie（限制重试次数，避免无限循环）
+        # 生成并验证新 Cookie（游客态；限制重试次数，避免无限循环）
         for _ in range(5):
             time.sleep(random.uniform(0.05, 0.15))
             cookie = self._generate_new_cookie()
@@ -321,7 +389,7 @@ class FanqieSite(NovelSite):
                 response = fetch_url(self.HOME, headers=headers, timeout=10)
                 if response is not None and response.status_code == 200 and len(response.text) > 200:
                     with open(cookie_path, 'w', encoding='utf-8') as f:
-                        json.dump(cookie, f)
+                        json.dump({'type': 'guest', 'cookie': cookie}, f)
                     type(self)._cookie_cache = cookie
                     log(f"cookie已生成: {cookie}")
                     return cookie
@@ -331,8 +399,13 @@ class FanqieSite(NovelSite):
 
     def make_headers(self) -> Dict[str, str]:
         cookie = self._get_cookie() or ''
+        # 会话固定 UA：登录态优先用用户粘贴的 UA（与 Cookie 配套），否则会话内首次随机后固定复用
+        ua = self._session_ua
+        if not ua:
+            ua = self._login_ua_cache or get_random_user_agent()
+            self._session_ua = ua
         return {
-            "User-Agent": get_random_user_agent(),
+            "User-Agent": ua,
             "Cookie": cookie,
         }
 
@@ -352,11 +425,17 @@ class FanqieSite(NovelSite):
     # ---------- 元信息 / 目录 / 正文 ----------
 
     def get_book_info(self, book_id: str) -> Optional[BookInfo]:
-        """获取书名、作者、简介"""
+        """获取书名、作者、简介；命中风控信号抛 RiskControlError"""
         url = f'{self.HOME}/page/{book_id}'
         response = fetch_url(url, self.make_headers())
-        if response is None or response.status_code != 200:
-            log(f"网络请求失败，状态码: {response.status_code if response else '未知'}")
+        if response is None:
+            log("网络请求失败")
+            return None
+        reason = check_risk_control(response)
+        if reason:
+            raise RiskControlError(reason)
+        if response.status_code != 200:
+            log(f"网络请求失败，状态码: {response.status_code}")
             return None
 
         soup = bs4.BeautifulSoup(response.text, 'html.parser')
@@ -379,11 +458,17 @@ class FanqieSite(NovelSite):
         return BookInfo(name=name, author=author_name, description=description)
 
     def fetch_catalog(self, book_id: str) -> List[ChapterRef]:
-        """拉取章节列表，返回统一的 ChapterRef 列表"""
+        """拉取章节列表，返回统一的 ChapterRef 列表；命中风控信号抛 RiskControlError"""
         url = f'{self.HOME}/page/{book_id}'
         response = fetch_url(url, self.make_headers())
-        if response is None or response.status_code != 200:
-            log(f"获取章节列表失败，状态码: {response.status_code if response else '未知'}")
+        if response is None:
+            log("获取章节列表失败")
+            return []
+        reason = check_risk_control(response)
+        if reason:
+            raise RiskControlError(reason)
+        if response.status_code != 200:
+            log(f"获取章节列表失败，状态码: {response.status_code}")
             return []
         soup = bs4.BeautifulSoup(response.text, 'lxml')
         items = soup.select("div.chapter-item")
@@ -407,15 +492,24 @@ class FanqieSite(NovelSite):
         return titles
 
     def fetch_chapter(self, item_id: str) -> Optional[str]:
-        """从官网 reader 页面解析并解密章节内容（单次获取，重试由引擎统一处理）"""
+        """从官网 reader 页面解析并解密章节内容（单次获取，重试由引擎统一处理）
+        章节被锁定（VIP/需登录）时抛出 ChapterLockedError；命中风控信号抛 RiskControlError"""
         url = f"{self.HOME}/reader/{item_id}"
         response = fetch_url(url, self.make_headers())
         if response is None:
             log(f"官网请求失败: {item_id}")
             return None
+        reason = check_risk_control(response)
+        if reason:
+            raise RiskControlError(reason)
         if response.status_code != 200:
             log(f"官网请求失败，状态码: {response.status_code} ({item_id})")
             return None
+        # 优先读取页面内嵌正文数据（__INITIAL_STATE__）；锁定章节在此识别，避免把 VIP 引导文案当作正文
+        content = self._extract_chapter_content(response.text, item_id)
+        if content is not None:
+            return content
+        # 后备：解析渲染后的正文容器（兼容页面结构变化）
         soup = bs4.BeautifulSoup(response.text, 'lxml')
         content_div = soup.find('div', class_='muye-reader-content')
         if not content_div:
@@ -430,6 +524,116 @@ class FanqieSite(NovelSite):
             log(f"官网正文解密后为空: {item_id}")
             return None
         return '\n'.join('    ' + line if line.strip() else line for line in lines)
+
+    @classmethod
+    def _extract_chapter_content(cls, page_text: str, item_id: str) -> Optional[str]:
+        """从 __INITIAL_STATE__.reader.chapterData.content 提取并解密正文。
+        返回解密后的正文；章节被锁定且无可用正文时抛 ChapterLockedError；页面无内嵌数据返回 None"""
+        marker = 'window.__INITIAL_STATE__='
+        i = page_text.find(marker)
+        if i < 0:
+            return None
+        try:
+            j = page_text.find('{', i + len(marker))
+            state, _ = json.JSONDecoder().raw_decode(page_text[j:])
+            chapter = state.get('reader', {}).get('chapterData', {})
+        except Exception:
+            return None
+        # 锁定章节一律跳过（页面中的 VIP 引导文案不是正文，不能混入下载结果）
+        if chapter.get('isChapterLock'):
+            raise ChapterLockedError("章节已锁定，需登录番茄账号或使用 APP 阅读")
+        content = chapter.get('content')
+        if isinstance(content, str) and content.strip():
+            soup = bs4.BeautifulSoup(content, 'lxml')
+            lines = []
+            for p in soup.find_all('p'):
+                raw = p.get_text()
+                decrypted = ''.join(cls.interpreter(ord(ch)) for ch in raw)
+                lines.append(decrypted)
+            if any(line.strip() for line in lines):
+                return '\n'.join('    ' + line if line.strip() else line for line in lines)
+        return None
+
+
+# ---------- cookie.json 文件读写（登录态 / 游客态，向后兼容） ----------
+
+def _write_cookie_file(data: Dict[str, Any]) -> None:
+    with open(cookie_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def _parse_cookie_file() -> Tuple[Optional[str], Optional[str]]:
+    """解析 cookie.json，返回 (cookie, ua)。
+    形态A 登录态 / 形态B 游客态 / 形态C 旧版纯字符串（视为游客态）；解析失败返回 (None, None)"""
+    try:
+        with open(cookie_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return None, None
+    if isinstance(data, dict):
+        cookie = data.get('cookie')
+        if isinstance(cookie, str) and cookie.strip():
+            return cookie, (data.get('ua') or None)
+        return None, None
+    if isinstance(data, str) and data.strip():
+        return data, None  # 旧版纯字符串：视为游客 Cookie
+    return None, None
+
+
+def save_login_cookie(cookie: str, ua: str) -> None:
+    """保存登录态 Cookie（Cookie + 配套 UA）到 cookie.json，并更新类级缓存"""
+    _write_cookie_file({'type': 'login', 'cookie': cookie, 'ua': ua or ''})
+    FanqieSite._cookie_cache = cookie
+    FanqieSite._login_cookie_cache = cookie
+    FanqieSite._login_ua_cache = ua or None
+
+
+def save_guest_cookie(cookie: str) -> None:
+    """保存游客态 Cookie 到 cookie.json，并清除登录态缓存"""
+    _write_cookie_file({'type': 'guest', 'cookie': cookie})
+    FanqieSite._cookie_cache = cookie
+    FanqieSite._login_cookie_cache = None
+    FanqieSite._login_ua_cache = None
+
+
+def clear_cookie_file() -> None:
+    """删除 cookie.json 并清空类级缓存（登录态与游客态均清除）"""
+    try:
+        os.remove(cookie_path)
+    except OSError:
+        pass
+    FanqieSite._cookie_cache = None
+    FanqieSite._login_cookie_cache = None
+    FanqieSite._login_ua_cache = None
+
+
+def load_login_credentials() -> Optional[Tuple[str, str]]:
+    """读取 cookie.json 中的登录态；不存在或为游客态时返回 None"""
+    cookie, ua = _parse_cookie_file()
+    if cookie and FanqieSite._looks_like_login(cookie):
+        return cookie, ua
+    return None
+
+
+def verify_login_cookie(cookie: str, ua: str) -> Tuple[bool, str]:
+    """用给定 Cookie + UA 请求站点首页验证登录态有效性。
+    返回 (是否有效, 说明)；网络异常视为"无法验证"而非"Cookie 无效"（False + 网络提示）"""
+    headers = {
+        'User-Agent': ua or get_random_user_agent(),
+        'Cookie': cookie,
+    }
+    try:
+        response = fetch_url(FanqieSite.HOME, headers=headers, timeout=10)
+    except Exception as e:
+        return False, f"网络异常: {e}"
+    if response is None:
+        return False, "网络请求失败"
+    reason = check_risk_control(response)
+    if reason:
+        return False, reason
+    if getattr(response, 'status_code', None) == 200 and len(getattr(response, 'text', '') or '') > 200:
+        return True, "Cookie 有效"
+    return False, f"异常响应（HTTP {getattr(response, 'status_code', '未知')}）"
 
 
 # 兼容入口：默认使用番茄站点（供外部脚本 / 旧接口引用）
@@ -452,11 +656,43 @@ SITE_REGISTRY: Dict[str, type] = {
 
 # =========================== 下载编排（站点无关） ===========================
 
+class ChapterLockedError(Exception):
+    """章节被锁定（VIP/需登录），无法获取正文"""
+
+
+class RiskControlError(Exception):
+    """检测到风控信号（403/429/验证码页/登录跳转），立即停止下载以保护账号"""
+
+
+def check_risk_control(response: Optional[requests.Response]) -> Optional[str]:
+    """风控体检：命中 403/429、验证码页、登录跳转时返回命中原因，否则返回 None"""
+    if response is None:
+        return None
+    status = getattr(response, 'status_code', None)
+    if status in (403, 429):
+        return f"HTTP {status}（疑似风控限流）"
+    text = getattr(response, 'text', '') or ''
+    lowered = text.lower()
+    for marker in ('captcha', '安全验证'):
+        if marker.lower() in lowered:
+            return f"检测到验证码/风控页面（{marker}）"
+    url = getattr(response, 'url', '') or ''
+    if 'login' in url.lower():
+        return "检测到跳转登录页（Cookie 可能已失效）"
+    return None
+
+
 def _fetch_with_retry(site: NovelSite, item_id: str) -> Optional[str]:
-    """统一正文获取重试逻辑：单次失败重试 3 次，均失败返回 None"""
+    """统一正文获取重试逻辑：锁定章节直接跳过；风控异常立即上抛不重试；其余失败重试 3 次"""
     max_retries = 3
     for attempt in range(max_retries):
-        content = site.fetch_chapter(item_id)
+        try:
+            content = site.fetch_chapter(item_id)
+        except ChapterLockedError as e:
+            log(f"章节已锁定，跳过: {item_id}（{e}）")
+            return None
+        except RiskControlError:
+            raise  # 风控信号：绝不重试，立即停止保护账号
         if content:
             return content
         log(f"下载失败，正在重试({attempt + 1}/{max_retries})")
@@ -471,8 +707,8 @@ def download_chapter(site: NovelSite, ref: ChapterRef, total: int) -> Tuple[int,
         log(f"第 {ref.index + 1} 章没有链接或无法解析章节ID，跳过")
         return ref.index, ref.title, None
 
-    # 轻微节流：错开并发请求，降低触发站点风控的概率
-    time.sleep(random.uniform(0.1, 0.3))
+    # 全局节流：登录态 1~3s/请求、游客态 0.1~0.3s/请求，错开并发以降低触发风控的概率
+    get_rate_limiter().acquire()
     content = _fetch_with_retry(site, ref.item_id)
 
     if content:
@@ -502,13 +738,21 @@ def _download_all(site: NovelSite, catalog: List[ChapterRef],
         for _ in tqdm(as_completed(futures), total=count, desc="下载进度"):
             pass
 
-        # 收集结果并按索引归位
+        # 收集结果并按索引归位；命中风控信号则取消全部任务并上抛（保护账号）
+        risk_error: Optional[RiskControlError] = None
         for future in futures:
             try:
                 index, title, content = future.result()
                 chapter_results[index] = (title, content)
+            except RiskControlError as e:
+                risk_error = e
+                for f in futures:
+                    f.cancel()
+                break
             except Exception as e:
                 log(f"章节下载异常: {e}")
+    if risk_error:
+        raise risk_error
     return chapter_results
 
 
@@ -516,8 +760,14 @@ def Run(book_id: str, save_path: str, chapter_range: Optional[str] = None, site:
     """运行下载：获取书籍信息 → 章节列表 → 多线程下载 → 按格式写出
     chapter_range: None/''=全部；'N'=仅第N章；'1-N'=前N章；未传时使用全局 CHAPTER_RANGE
     site: 站点标识（SITE_REGISTRY 的 key，默认 fanqie）"""
-    global OUTPUT_FORMAT, CHAPTER_RANGE
+    global OUTPUT_FORMAT, CHAPTER_RANGE, MAX_WORKERS
     _clamp_workers()
+    # 登录态下执行保守防风控策略：并发封顶 2、请求间隔 1~3s
+    if FanqieSite.is_login_mode():
+        MAX_WORKERS = effective_workers(MAX_WORKERS)
+        log("登录模式：保守限速（≤2 线程 / 1~3s 请求间隔），检测到风控信号将立即停止以保护账号")
+    else:
+        log("游客模式：使用匿名 Cookie，部分章节可能被锁定")
 
     # 解析站点
     site_cls = SITE_REGISTRY.get(site)
@@ -536,14 +786,22 @@ def Run(book_id: str, save_path: str, chapter_range: Optional[str] = None, site:
     start = parsed[0] if parsed else None
     end = parsed[1] if parsed else None
 
-    # 获取书籍信息
-    info = site_obj.get_book_info(book_id)
+    # 获取书籍信息（风控信号直接停止）
+    try:
+        info = site_obj.get_book_info(book_id)
+    except RiskControlError as e:
+        log(f"检测到风控信号，已停止下载以保护账号: {e}")
+        return
     if info is None or not info.name:
         log("无法获取书籍信息，请检查小说ID或网络连接。")
         return
 
-    # 获取章节列表
-    catalog = site_obj.fetch_catalog(book_id)
+    # 获取章节列表（风控信号直接停止）
+    try:
+        catalog = site_obj.fetch_catalog(book_id)
+    except RiskControlError as e:
+        log(f"检测到风控信号，已停止下载以保护账号: {e}")
+        return
     total = len(catalog)
     if total == 0:
         log("未找到任何章节，请检查小说ID是否正确。")
@@ -561,7 +819,11 @@ def Run(book_id: str, save_path: str, chapter_range: Optional[str] = None, site:
 
     os.makedirs(save_path, exist_ok=True)
     log(f"使用 {MAX_WORKERS} 个线程下载，共 {total} 章")
-    chapter_results = _download_all(site_obj, catalog, start, end)
+    try:
+        chapter_results = _download_all(site_obj, catalog, start, end)
+    except RiskControlError as e:
+        log(f"检测到风控信号，已停止下载以保护账号: {e}")
+        return
 
     # 组装有序章节（跳过未下载/下载失败的；范围下载时未选中的索引为 None）
     chapters = [(i, result[0], result[1]) for i, result in enumerate(chapter_results)
@@ -569,6 +831,12 @@ def Run(book_id: str, save_path: str, chapter_range: Optional[str] = None, site:
     if not chapters:
         log("所有章节均下载失败。")
         return
+
+    # 汇总提示：范围下载时用实际选取的章节数，全量下载时用全书章节数
+    attempted = (end - start) if start is not None else total
+    skipped = attempted - len(chapters)
+    if skipped > 0:
+        log(f"共 {len(chapters)} 章下载成功，{skipped} 章失败或被跳过（锁定章节需登录番茄账号，详见上方日志）")
 
     # 根据输出格式写出文件
     if OUTPUT_FORMAT == "txt":
@@ -586,7 +854,7 @@ def Run(book_id: str, save_path: str, chapter_range: Optional[str] = None, site:
 def main() -> None:
     book_id = input("欢迎使用番茄小说下载器精简版！\n作者：Dlmos（Dlmily）\n基于DlmOS驱动\nGithub：https://github.com/Dlmily/Tomato-Novel-Downloader-Lite\n参考代码：https://github.com/ying-ck/fanqienovel-downloader/blob/main/src/ref_main.py\n赞助/了解新产品：https://afdian.com/a/dlbaokanluntanos\n\n请输入小说 ID：")
     save_path = input("请输入保存路径：")
-    range_str = input("下载范围（留空=全部；N=仅第N章；1-N=前N章）：").strip()
+    range_str = input("下载范围（留空=全部；N=仅第N章；N-M=第N到M章）：").strip()
     site = input(f"小说网站（可选: {', '.join(SITE_REGISTRY)}，默认 fanqie）：").strip() or "fanqie"
 
     Run(book_id, save_path, range_str or None, site)
